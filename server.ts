@@ -8,6 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { AionAgentOrchestrator } from './server/orchestrator.js';
 import { repository } from './server/repository.js';
+import { ChatMessage } from './src/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,6 +26,16 @@ async function startServer() {
     res.json({ status: 'ok', name: 'AION 2 OPTIMIZER' });
   });
 
+  // Chat history API
+  app.get('/api/messages', (req, res) => {
+    try {
+      const messages = repository.getChatMessages();
+      res.json({ messages });
+    } catch (err: any) {
+      res.status(500).json({ error: '대화 기록 조회 실패' });
+    }
+  });
+
   // Main Chat API
   app.post('/api/chat', async (req, res) => {
     try {
@@ -34,13 +45,42 @@ async function startServer() {
         return;
       }
 
+      const userMsg: ChatMessage = {
+        id: `usr_${Date.now()}`,
+        role: 'user',
+        content: message.trim(),
+        timestamp: new Date().toISOString(),
+        status: 'complete',
+      };
+      repository.saveChatMessage(userMsg);
+
       const result = await orchestrator.handleMessage({
         userMessage: message.trim(),
         conversation,
         repository,
       });
 
-      res.json(result);
+      const assistantMsg: ChatMessage = {
+        id: `ast_${Date.now()}`,
+        role: 'assistant',
+        content: result.answer || '답변을 생성하지 못했습니다.',
+        timestamp: new Date().toISOString(),
+        status: 'complete',
+        metadata: {
+          intents: result.intents,
+          characterId: result.characterId,
+          stateChanges: result.stateChanges,
+          decisionId: result.metadata?.decisionId,
+          confidence: result.metadata?.confidence,
+        },
+      };
+      repository.saveChatMessage(assistantMsg);
+
+      res.json({
+        ...result,
+        userMessage: userMsg,
+        assistantMessage: assistantMsg,
+      });
     } catch (err: any) {
       console.error('Chat endpoint error:', err);
       res.status(500).json({

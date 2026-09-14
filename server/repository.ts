@@ -1,6 +1,7 @@
 /**
  * Storage Abstraction: ProjectStateRepository
- * Provides persistent state, event log, economy ledger, and decision history.
+ * Provides persistent state, event log, economy ledger, decision history,
+ * and persistent chat history.
  */
 
 import fs from 'fs';
@@ -9,6 +10,7 @@ import {
   AionEvent,
   CharacterIdentity,
   CharacterState,
+  ChatMessage,
   DecisionRecord,
   ExperimentRecord,
   LedgerEntry,
@@ -22,6 +24,7 @@ interface DatabaseSchema {
   decisions: DecisionRecord[];
   experiments: ExperimentRecord[];
   masterState: MasterState;
+  chatMessages: ChatMessage[];
 }
 
 const DATA_DIR = path.join(process.cwd(), '.data');
@@ -46,10 +49,23 @@ export class ProjectStateRepository {
     if (fs.existsSync(DATA_FILE)) {
       try {
         const raw = fs.readFileSync(DATA_FILE, 'utf-8');
-        this.db = JSON.parse(raw);
+        const parsed = JSON.parse(raw);
+
+        // Backward compatibility:
+        // 기존 state.json에 chatMessages가 없어도 정상적으로 시작되도록 처리
+        this.db = {
+          ...parsed,
+          chatMessages: Array.isArray(parsed.chatMessages)
+            ? parsed.chatMessages
+            : [],
+        };
+
         return;
       } catch (err) {
-        console.error('Failed to read state file, initializing defaults:', err);
+        console.error(
+          'Failed to read state file, initializing defaults:',
+          err
+        );
       }
     }
 
@@ -126,18 +142,31 @@ export class ProjectStateRepository {
       decisions: [],
       experiments: [],
       masterState,
+      chatMessages: [],
     };
   }
 
   private persist() {
     try {
-      fs.writeFileSync(DATA_FILE, JSON.stringify(this.db, null, 2), 'utf-8');
+      // 혹시 런타임 시작 직후 .data가 없어도 다시 생성
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+
+      fs.writeFileSync(
+        DATA_FILE,
+        JSON.stringify(this.db, null, 2),
+        'utf-8'
+      );
     } catch (err) {
       console.error('Failed to write state file:', err);
     }
   }
 
-  // Repository Operations
+  // ---------------------------------------------------------------------------
+  // Character / State Operations
+  // ---------------------------------------------------------------------------
+
   public getCharacters(): CharacterState[] {
     return Object.values(this.db.characters);
   }
@@ -160,6 +189,7 @@ export class ProjectStateRepository {
     const evts = characterId
       ? this.db.events.filter((e) => e.characterId === characterId)
       : this.db.events;
+
     return evts.slice(-limit);
   }
 
@@ -167,6 +197,7 @@ export class ProjectStateRepository {
     const entries = characterId
       ? this.db.ledger.filter((l) => l.characterId === characterId)
       : this.db.ledger;
+
     return entries.slice(-limit);
   }
 
@@ -182,6 +213,34 @@ export class ProjectStateRepository {
     return this.db.experiments;
   }
 
+  // ---------------------------------------------------------------------------
+  // Persistent Chat History
+  // ---------------------------------------------------------------------------
+
+  public getChatMessages(limit?: number): ChatMessage[] {
+    if (!limit || limit <= 0) {
+      return [...this.db.chatMessages];
+    }
+
+    return this.db.chatMessages.slice(-limit);
+  }
+
+  public saveChatMessage(message: ChatMessage): void {
+    this.db.chatMessages.push(message);
+    this.persist();
+  }
+
+  public saveChatMessages(messages: ChatMessage[]): void {
+    if (!messages.length) return;
+
+    this.db.chatMessages.push(...messages);
+    this.persist();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Event / Ledger / Decision Operations
+  // ---------------------------------------------------------------------------
+
   public saveEvent(event: AionEvent): void {
     this.db.events.push(event);
     this.persist();
@@ -194,9 +253,11 @@ export class ProjectStateRepository {
 
   public saveDecision(decision: DecisionRecord): void {
     this.db.decisions.push(decision);
+
     if (!this.db.masterState.activeDecisions.includes(decision.id)) {
       this.db.masterState.activeDecisions.push(decision.id);
     }
+
     this.persist();
   }
 
@@ -205,11 +266,16 @@ export class ProjectStateRepository {
     this.persist();
   }
 
+  // ---------------------------------------------------------------------------
+  // Character State Mutation
+  // ---------------------------------------------------------------------------
+
   public updateCharacterState(
     characterId: string,
     updater: (current: CharacterState) => CharacterState
   ): CharacterState {
     let char = this.db.characters[characterId];
+
     if (!char) {
       // Create if needed
       char = {
@@ -225,9 +291,15 @@ export class ProjectStateRepository {
         equipment: {},
         arcana: {},
         skills: {},
-        currency: { kinah: 0, ap: 0 },
+        currency: {
+          kinah: 0,
+          ap: 0,
+        },
         inventory: {},
-        farmingHistory: { totalEarnedKinah: 0, farmingRecords: [] },
+        farmingHistory: {
+          totalEarnedKinah: 0,
+          farmingRecords: [],
+        },
         activeGoals: [],
         openProblems: [],
         currentRecommendations: [],
@@ -235,17 +307,23 @@ export class ProjectStateRepository {
         lastUpdated: new Date().toISOString(),
       };
     }
+
     const updated = updater(char);
     updated.lastUpdated = new Date().toISOString();
+
     this.db.characters[characterId] = updated;
+
     this.rebuildMasterState();
     this.persist();
+
     return updated;
   }
 
   public rebuildMasterState(): MasterState {
     const now = new Date();
-    const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const oneWeekAgo = new Date(
+      now.getTime() - 7 * 24 * 60 * 60 * 1000
+    );
 
     let totalKinah = 0;
     const summaries: MasterState['characterSummaries'] = {};
@@ -253,9 +331,11 @@ export class ProjectStateRepository {
     for (const char of Object.values(this.db.characters)) {
       const kinah = char.currency.kinah || 0;
       totalKinah += kinah;
+
       const weapon = char.equipment.weapon
         ? `${char.equipment.weapon.name} +${char.equipment.weapon.enhanceLevel}`
         : undefined;
+
       const arcana = char.arcana.mainArcana
         ? `${char.arcana.mainArcana.name} +${char.arcana.mainArcana.enhanceLevel}`
         : undefined;
@@ -278,6 +358,7 @@ export class ProjectStateRepository {
 
     for (const entry of this.db.ledger) {
       const d = new Date(entry.datetime);
+
       if (d >= oneWeekAgo) {
         if (entry.direction === 'income') {
           weeklyIncome += entry.amount;
@@ -290,7 +371,9 @@ export class ProjectStateRepository {
     const netWeekly = weeklyIncome - weeklyExpense;
 
     const latestDecision = this.getLatestDecision();
-    const recheckTriggers = latestDecision ? latestDecision.recheckTriggers : [];
+    const recheckTriggers = latestDecision
+      ? latestDecision.recheckTriggers
+      : [];
 
     this.db.masterState = {
       snapshotTimestamp: now.toISOString(),
@@ -298,7 +381,9 @@ export class ProjectStateRepository {
       characterCount: Object.keys(this.db.characters).length,
       unresolvedInformation: [],
       knownConflicts: [],
-      majorCurrentObjectives: Object.values(this.db.characters).flatMap((c) => c.activeGoals),
+      majorCurrentObjectives: Object.values(this.db.characters).flatMap(
+        (c) => c.activeGoals
+      ),
       characterSummaries: summaries,
       economySummary: {
         totalKinah,

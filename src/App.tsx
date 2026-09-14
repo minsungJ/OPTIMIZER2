@@ -4,13 +4,11 @@ import { EmptyState } from './components/EmptyState.js';
 import { MessageItem } from './components/MessageItem.js';
 import { MessageComposer } from './components/MessageComposer.js';
 import { ChatMessage } from './types.js';
-import { RotateCcw } from 'lucide-react';
 
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [isResetting, setIsResetting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -19,6 +17,23 @@ export default function App() {
   const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
     messagesEndRef.current?.scrollIntoView({ behavior });
   };
+
+  // Load persistent chat history on mount
+  useEffect(() => {
+    fetch('/api/messages')
+      .then((res) => {
+        if (!res.ok) throw new Error('Failed to fetch messages');
+        return res.json();
+      })
+      .then((data) => {
+        if (Array.isArray(data.messages) && data.messages.length > 0) {
+          setMessages(data.messages);
+        }
+      })
+      .catch((err) => {
+        console.warn('Could not load chat history:', err);
+      });
+  }, []);
 
   useEffect(() => {
     scrollToBottom();
@@ -100,26 +115,10 @@ export default function App() {
     }
   };
 
-  const handleReset = async () => {
-    if (!window.confirm('대화 기록과 변경된 상태를 초기값으로 리셋하시겠습니까?')) {
-      return;
-    }
-    setIsResetting(true);
-    try {
-      await fetch('/api/reset', { method: 'POST' });
-      setMessages([]);
-      setErrorMessage(null);
-    } catch (err) {
-      console.error('Reset error:', err);
-    } finally {
-      setIsResetting(false);
-    }
-  };
-
   return (
     <div className="flex h-screen w-full overflow-hidden bg-[#0d0d0d] text-[#ececec] font-sans antialiased">
       {/* Left Systematic Sidebar for Desktop */}
-      <Sidebar onReset={handleReset} isResetting={isResetting} />
+      <Sidebar />
 
       {/* Main Column */}
       <div className="flex flex-1 flex-col overflow-hidden">
@@ -132,17 +131,6 @@ export default function App() {
             <div className="h-3 w-3 rounded-[2px] bg-[#ececec]" />
             <span>AION 2 OPTIMIZER</span>
           </div>
-
-          <button
-            onClick={handleReset}
-            disabled={isResetting}
-            title="대화 및 상태 초기화"
-            type="button"
-            className="flex items-center gap-1.5 rounded-md border border-[#262626] bg-transparent px-2.5 py-1.5 font-mono text-[11px] text-[#ececec] transition-colors hover:bg-[#262626] disabled:opacity-40"
-          >
-            <RotateCcw className={`h-3 w-3 ${isResetting ? 'animate-spin' : ''}`} />
-            <span>초기화</span>
-          </button>
         </header>
 
         {/* Main Conversation Area */}
