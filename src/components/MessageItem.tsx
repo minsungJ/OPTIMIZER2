@@ -13,15 +13,15 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
   return (
     <div
       id={`message-${message.id}`}
-      className={`group flex w-full flex-col py-3.5 ${
+      className={`group flex w-full flex-col py-2.5 ${
         isUser ? 'items-end' : 'items-start'
       }`}
     >
       <div
-        className={`max-w-2xl rounded-xl px-4 py-3 text-sm leading-relaxed transition-colors ${
+        className={`max-w-2xl text-sm leading-relaxed transition-colors ${
           isUser
-            ? 'bg-slate-900 text-white font-normal shadow-xs dark:bg-slate-100 dark:text-slate-950'
-            : 'w-full bg-white text-slate-800 border border-slate-200/80 shadow-xs dark:bg-slate-900 dark:text-slate-100 dark:border-slate-800'
+            ? 'rounded-xl border border-[#262626] bg-[#1a1a1a] px-4 py-2.5 text-[#ececec] font-normal shadow-[0_2px_12px_rgba(0,0,0,0.3)]'
+            : 'w-full rounded-xl border border-[#262626] bg-[#121212] px-5 py-4 text-[#ececec] shadow-[0_2px_16px_rgba(0,0,0,0.4)]'
         }`}
       >
         {isUser ? (
@@ -32,13 +32,13 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
               <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
             </div>
 
-            {/* State mutation pills if recorded */}
+            {/* Systematic state mutation pills */}
             {message.metadata?.stateChanges && message.metadata.stateChanges.length > 0 && (
-              <div className="mt-2.5 flex flex-wrap gap-1.5 border-t border-slate-100 pt-2.5 dark:border-slate-800">
+              <div className="mt-3 flex flex-wrap gap-1.5 border-t border-[#262626] pt-3">
                 {message.metadata.stateChanges.map((change, i) => (
                   <span
                     key={i}
-                    className="inline-flex items-center rounded-md bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-100/80 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800/60"
+                    className="inline-flex items-center rounded border border-[#2e2e2e] bg-[#1c1c1c] px-2 py-0.5 font-mono text-[11px] text-[#a3a3a3]"
                   >
                     {change}
                   </span>
@@ -51,3 +51,4 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
     </div>
   );
 };
+

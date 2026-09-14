@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Header } from './components/Header.js';
+import { Sidebar } from './components/Sidebar.js';
 import { EmptyState } from './components/EmptyState.js';
 import { MessageItem } from './components/MessageItem.js';
 import { MessageComposer } from './components/MessageComposer.js';
 import { ChatMessage } from './types.js';
+import { RotateCcw } from 'lucide-react';
 
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -11,12 +12,6 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  useEffect(() => {
-    // Ensure clean light mode as requested
-    document.documentElement.classList.remove('dark');
-    localStorage.removeItem('aion2_theme');
-  }, []);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -122,48 +117,80 @@ export default function App() {
   };
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-50 text-slate-900 antialiased font-sans">
-      <Header onReset={handleReset} isResetting={isResetting} />
+    <div className="flex h-screen w-full overflow-hidden bg-[#0d0d0d] text-[#ececec] font-sans antialiased">
+      {/* Left Systematic Sidebar for Desktop */}
+      <Sidebar onReset={handleReset} isResetting={isResetting} />
 
-      {/* Main Conversation Container */}
-      <main className="flex flex-1 flex-col mx-auto w-full max-w-3xl px-4 pt-4 pb-2">
-        {errorMessage && (
-          <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-2.5 text-xs text-rose-700">
-            {errorMessage}
+      {/* Main Column */}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Mobile Header */}
+        <header
+          id="mobile-header"
+          className="flex items-center justify-between border-b border-[#262626] bg-[#000000] px-4 py-3 md:hidden select-none"
+        >
+          <div className="flex items-center gap-2 text-sm font-semibold tracking-tight text-[#ececec]">
+            <div className="h-3 w-3 rounded-[2px] bg-[#ececec]" />
+            <span>AION 2 OPTIMIZER</span>
           </div>
-        )}
 
-        {messages.length === 0 ? (
-          <EmptyState />
-        ) : (
-          <div className="flex flex-1 flex-col space-y-1">
-            {messages.map((message) => (
-              <MessageItem key={message.id} message={message} />
-            ))}
+          <button
+            onClick={handleReset}
+            disabled={isResetting}
+            title="대화 및 상태 초기화"
+            type="button"
+            className="flex items-center gap-1.5 rounded-md border border-[#262626] bg-transparent px-2.5 py-1.5 font-mono text-[11px] text-[#ececec] transition-colors hover:bg-[#262626] disabled:opacity-40"
+          >
+            <RotateCcw className={`h-3 w-3 ${isResetting ? 'animate-spin' : ''}`} />
+            <span>초기화</span>
+          </button>
+        </header>
 
-            {isLoading && (
-              <div className="flex items-center space-x-2 py-4 text-xs text-slate-400 dark:text-slate-500">
-                <div className="flex space-x-1">
-                  <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 dark:bg-slate-500 [animation-delay:-0.3s]" />
-                  <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 dark:bg-slate-500 [animation-delay:-0.15s]" />
-                  <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 dark:bg-slate-500" />
-                </div>
-                <span>AION 2 최적화 엔진 분석 중...</span>
+        {/* Main Conversation Area */}
+        <main className="relative flex flex-1 flex-col overflow-hidden">
+          <div className="content-shell mx-auto flex h-full w-full max-w-[768px] flex-1 flex-col px-4 pt-6 pb-2">
+            {errorMessage && (
+              <div className="mb-4 rounded-lg border border-[#3f1d1d] bg-[#1f1010] px-4 py-2.5 text-xs text-[#fca5a5]">
+                {errorMessage}
               </div>
             )}
 
-            <div ref={messagesEndRef} className="h-4" />
-          </div>
-        )}
-      </main>
+            {/* Content Body: Empty State vs Message Stream */}
+            {messages.length === 0 ? (
+              <EmptyState />
+            ) : (
+              <div className="flex flex-1 flex-col overflow-y-auto pr-1">
+                {messages.map((message) => (
+                  <MessageItem key={message.id} message={message} />
+                ))}
 
-      {/* Message Composer */}
-      <MessageComposer
-        input={input}
-        setInput={setInput}
-        onSend={() => handleSend()}
-        isLoading={isLoading}
-      />
+                {isLoading && (
+                  <div className="flex items-center space-x-2 py-4 text-xs text-[#8e8e8e]">
+                    <div className="flex space-x-1">
+                      <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#8e8e8e] [animation-delay:-0.3s]" />
+                      <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#8e8e8e] [animation-delay:-0.15s]" />
+                      <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#8e8e8e]" />
+                    </div>
+                    <span className="font-mono text-[11px]">AION 2 OPTIMIZING...</span>
+                  </div>
+                )}
+
+                <div ref={messagesEndRef} className="h-4" />
+              </div>
+            )}
+
+            {/* Composer wrapper aligned with design */}
+            <div className="composer-wrapper mt-auto">
+              <MessageComposer
+                input={input}
+                setInput={setInput}
+                onSend={() => handleSend()}
+                isLoading={isLoading}
+              />
+            </div>
+          </div>
+        </main>
+      </div>
     </div>
   );
 }
+
