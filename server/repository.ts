@@ -7,6 +7,7 @@
 import fs from 'fs';
 import path from 'path';
 import {
+  Account,
   AionEvent,
   CharacterIdentity,
   CharacterState,
@@ -18,6 +19,7 @@ import {
 } from '../src/types.js';
 
 interface DatabaseSchema {
+  accounts: Record<string, Account>;
   characters: Record<string, CharacterState>;
   events: AionEvent[];
   ledger: LedgerEntry[];
@@ -50,22 +52,11 @@ export class ProjectStateRepository {
       try {
         const raw = fs.readFileSync(DATA_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
-
-        // Backward compatibility:
-        // 기존 state.json에 chatMessages가 없어도 정상적으로 시작되도록 처리
-        this.db = {
-          ...parsed,
-          chatMessages: Array.isArray(parsed.chatMessages)
-            ? parsed.chatMessages
-            : [],
-        };
-
+        this.db = this.migrateDatabase(parsed);
+        this.persist();
         return;
       } catch (err) {
-        console.error(
-          'Failed to read state file, initializing defaults:',
-          err
-        );
+        console.error('Failed to read state file, initializing defaults:', err);
       }
     }
 
@@ -73,22 +64,26 @@ export class ProjectStateRepository {
     this.persist();
   }
 
-  private generateSeedData(): DatabaseSchema {
-    const now = new Date();
-    const isoNow = now.toISOString();
-
-    const defaultCharIdentity: CharacterIdentity = {
-      id: 'CHAR_001',
-      name: '검성',
-      className: '검성',
-      level: 55,
-      aliases: ['검성', '대검', '창', '본캐', 'gladiator'],
-      isDefault: true,
-    };
-
-    const defaultCharState: CharacterState = {
-      characterId: 'CHAR_001',
-      identity: defaultCharIdentity,
+  private createDefaultCharacterState(
+    id: string,
+    name: string,
+    className: string,
+    accountId: string,
+    isMain: boolean,
+    aliases: string[],
+    isoNow: string
+  ): CharacterState {
+    return {
+      characterId: id,
+      identity: {
+        id,
+        name,
+        className,
+        level: 55,
+        aliases,
+        accountId,
+        isMain,
+      },
       coreStats: {},
       equipment: {},
       arcana: {},
@@ -108,42 +103,211 @@ export class ProjectStateRepository {
       uncertainty: [],
       lastUpdated: isoNow,
     };
+  }
 
-    const masterState: MasterState = {
-      snapshotTimestamp: isoNow,
-      dataCutoff: isoNow,
-      characterCount: 1,
-      unresolvedInformation: [],
-      knownConflicts: [],
-      majorCurrentObjectives: [],
-      characterSummaries: {
-        CHAR_001: {
-          name: '검성',
-          className: '검성',
-          kinah: 0,
-        },
+  private generateSeedData(): DatabaseSchema {
+    const now = new Date();
+    const isoNow = now.toISOString();
+
+    const accounts: Record<string, Account> = {
+      ACCOUNT_001: {
+        id: 'ACCOUNT_001',
+        name: '첫번째 계정',
+        characterIds: ['CHAR_001', 'CHAR_002', 'CHAR_003'],
       },
-      economySummary: {
-        totalKinah: 0,
-        weeklyIncome: 0,
-        weeklyExpense: 0,
-        netWeekly: 0,
+      ACCOUNT_002: {
+        id: 'ACCOUNT_002',
+        name: '두번째 계정',
+        characterIds: ['CHAR_004', 'CHAR_005'],
       },
-      activeDecisions: [],
-      recheckTriggers: [],
     };
 
-    return {
-      characters: {
-        CHAR_001: defaultCharState,
-      },
+    const characters: Record<string, CharacterState> = {
+      CHAR_001: this.createDefaultCharacterState(
+        'CHAR_001',
+        '질풍호법',
+        '호법성',
+        'ACCOUNT_001',
+        true,
+        ['질풍호법', '질풍', '호법성', '호법'],
+        isoNow
+      ),
+      CHAR_002: this.createDefaultCharacterState(
+        'CHAR_002',
+        '격앙수호',
+        '수호성',
+        'ACCOUNT_001',
+        false,
+        ['격앙수호', '격앙', '수호성', '수호'],
+        isoNow
+      ),
+      CHAR_003: this.createDefaultCharacterState(
+        'CHAR_003',
+        '지켈검성',
+        '검성',
+        'ACCOUNT_001',
+        false,
+        ['지켈검성', '지켈', '검성'],
+        isoNow
+      ),
+      CHAR_004: this.createDefaultCharacterState(
+        'CHAR_004',
+        '햐음',
+        '권성',
+        'ACCOUNT_002',
+        true,
+        ['햐음', '권성', '권사', '격투'],
+        isoNow
+      ),
+      CHAR_005: this.createDefaultCharacterState(
+        'CHAR_005',
+        '쩡은',
+        '치유성',
+        'ACCOUNT_002',
+        false,
+        ['쩡은', '치유성', '치유'],
+        isoNow
+      ),
+    };
+
+    const db: DatabaseSchema = {
+      accounts,
+      characters,
       events: [],
       ledger: [],
       decisions: [],
       experiments: [],
-      masterState,
+      masterState: {
+        snapshotTimestamp: isoNow,
+        dataCutoff: isoNow,
+        characterCount: 5,
+        unresolvedInformation: [],
+        knownConflicts: [],
+        majorCurrentObjectives: [],
+        characterSummaries: {},
+        accountSummaries: {},
+        economySummary: {
+          totalKinah: 0,
+          weeklyIncome: 0,
+          weeklyExpense: 0,
+          netWeekly: 0,
+        },
+        activeDecisions: [],
+        recheckTriggers: [],
+      },
       chatMessages: [],
     };
+
+    return db;
+  }
+
+  private migrateDatabase(parsed: any): DatabaseSchema {
+    const seed = this.generateSeedData();
+    const now = new Date().toISOString();
+
+    const accounts: Record<string, Account> = parsed.accounts || seed.accounts;
+    const rawChars: Record<string, CharacterState> = parsed.characters || {};
+    const characters: Record<string, CharacterState> = { ...seed.characters };
+
+    // Standard 5-character roster definitions
+    const definitions: Record<
+      string,
+      { name: string; className: string; accountId: string; isMain: boolean; aliases: string[] }
+    > = {
+      CHAR_001: {
+        name: '질풍호법',
+        className: '호법성',
+        accountId: 'ACCOUNT_001',
+        isMain: true,
+        aliases: ['질풍호법', '질풍', '호법성', '호법'],
+      },
+      CHAR_002: {
+        name: '격앙수호',
+        className: '수호성',
+        accountId: 'ACCOUNT_001',
+        isMain: false,
+        aliases: ['격앙수호', '격앙', '수호성', '수호'],
+      },
+      CHAR_003: {
+        name: '지켈검성',
+        className: '검성',
+        accountId: 'ACCOUNT_001',
+        isMain: false,
+        aliases: ['지켈검성', '지켈', '검성'],
+      },
+      CHAR_004: {
+        name: '햐음',
+        className: '권성',
+        accountId: 'ACCOUNT_002',
+        isMain: true,
+        aliases: ['햐음', '권성', '권사', '격투'],
+      },
+      CHAR_005: {
+        name: '쩡은',
+        className: '치유성',
+        accountId: 'ACCOUNT_002',
+        isMain: false,
+        aliases: ['쩡은', '치유성', '치유'],
+      },
+    };
+
+    // If there was an old CHAR_001 that had custom data (like 검성 with kinah), preserve it
+    for (const [id, def] of Object.entries(definitions)) {
+      const existing = rawChars[id];
+      if (existing) {
+        // Keep user data (currency, equipment, arcana, coreStats, etc.)
+        characters[id] = {
+          ...existing,
+          identity: {
+            ...existing.identity,
+            id,
+            name: def.name,
+            className: def.className,
+            accountId: def.accountId,
+            isMain: def.isMain,
+            aliases: Array.from(new Set([...(existing.identity?.aliases || []), ...def.aliases])),
+          },
+        };
+      }
+    }
+
+    // Check if user had created custom character key like '햐음' directly
+    for (const [key, char] of Object.entries(rawChars)) {
+      if (!['CHAR_001', 'CHAR_002', 'CHAR_003', 'CHAR_004', 'CHAR_005'].includes(key)) {
+        if (key.includes('햐음') || char.identity?.name?.includes('햐음')) {
+          characters['CHAR_004'] = {
+            ...characters['CHAR_004'],
+            currency: char.currency || characters['CHAR_004'].currency,
+            equipment: char.equipment || characters['CHAR_004'].equipment,
+            arcana: char.arcana || characters['CHAR_004'].arcana,
+            coreStats: char.coreStats || characters['CHAR_004'].coreStats,
+          };
+        } else if (key.includes('쩡은') || char.identity?.name?.includes('쩡은')) {
+          characters['CHAR_005'] = {
+            ...characters['CHAR_005'],
+            currency: char.currency || characters['CHAR_005'].currency,
+            equipment: char.equipment || characters['CHAR_005'].equipment,
+            arcana: char.arcana || characters['CHAR_005'].arcana,
+            coreStats: char.coreStats || characters['CHAR_005'].coreStats,
+          };
+        }
+      }
+    }
+
+    const migrated: DatabaseSchema = {
+      accounts,
+      characters,
+      events: Array.isArray(parsed.events) ? parsed.events : [],
+      ledger: Array.isArray(parsed.ledger) ? parsed.ledger : [],
+      decisions: Array.isArray(parsed.decisions) ? parsed.decisions : [],
+      experiments: Array.isArray(parsed.experiments) ? parsed.experiments : [],
+      chatMessages: Array.isArray(parsed.chatMessages) ? parsed.chatMessages : [],
+      masterState: parsed.masterState || seed.masterState,
+    };
+
+    this.db = migrated;
+    this.rebuildMasterState();
+    return this.db;
   }
 
   private persist() {
@@ -164,8 +328,16 @@ export class ProjectStateRepository {
   }
 
   // ---------------------------------------------------------------------------
-  // Character / State Operations
+  // Account / Character / State Operations
   // ---------------------------------------------------------------------------
+
+  public getAccounts(): Record<string, Account> {
+    return this.db.accounts || {};
+  }
+
+  public getAccount(accountId: string): Account | undefined {
+    return (this.db.accounts || {})[accountId];
+  }
 
   public getCharacters(): CharacterState[] {
     return Object.values(this.db.characters);
@@ -175,10 +347,19 @@ export class ProjectStateRepository {
     return this.db.characters[characterId];
   }
 
+  public getCharacterByName(nameOrAlias: string): CharacterState | undefined {
+    const lower = nameOrAlias.trim().toLowerCase();
+    return this.getCharacters().find((c) => {
+      if (c.identity.name.toLowerCase() === lower) return true;
+      if (c.characterId.toLowerCase() === lower) return true;
+      if (c.identity.aliases?.some((a) => a.toLowerCase() === lower)) return true;
+      return false;
+    });
+  }
+
   public getDefaultCharacter(): CharacterState {
     const chars = this.getCharacters();
-    const found = chars.find((c) => c.identity.isDefault);
-    return found || chars[0];
+    return chars[0];
   }
 
   public getMasterState(): MasterState {
@@ -327,10 +508,14 @@ export class ProjectStateRepository {
 
     let totalKinah = 0;
     const summaries: MasterState['characterSummaries'] = {};
+    const accountKinahMap: Record<string, number> = {};
 
     for (const char of Object.values(this.db.characters)) {
       const kinah = char.currency.kinah || 0;
       totalKinah += kinah;
+
+      const accId = char.identity.accountId || 'ACCOUNT_001';
+      accountKinahMap[accId] = (accountKinahMap[accId] || 0) + kinah;
 
       const weapon = char.equipment.weapon
         ? `${char.equipment.weapon.name} +${char.equipment.weapon.enhanceLevel}`
@@ -346,9 +531,21 @@ export class ProjectStateRepository {
         mainWeapon: weapon,
         mainArcana: arcana,
         kinah,
+        accountId: char.identity.accountId,
+        isMain: char.identity.isMain,
         keyStats: char.coreStats.physicalAttack
           ? `물공 ${char.coreStats.physicalAttack}`
           : undefined,
+      };
+    }
+
+    const accountSummaries: MasterState['accountSummaries'] = {};
+    for (const [accId, acc] of Object.entries(this.db.accounts || {})) {
+      accountSummaries[accId] = {
+        id: accId,
+        name: acc.name,
+        characterIds: acc.characterIds,
+        totalKinah: accountKinahMap[accId] || 0,
       };
     }
 
@@ -385,6 +582,7 @@ export class ProjectStateRepository {
         (c) => c.activeGoals
       ),
       characterSummaries: summaries,
+      accountSummaries,
       economySummary: {
         totalKinah,
         weeklyIncome,

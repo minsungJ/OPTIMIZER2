@@ -22,12 +22,20 @@ export type FactConfidence =
   | 'UNKNOWN'
   | 'CONFLICTED';
 
+export interface Account {
+  id: string; // e.g. ACCOUNT_001, ACCOUNT_002
+  name: string; // "첫번째 계정", "두번째 계정"
+  characterIds: string[];
+}
+
 export interface CharacterIdentity {
   id: string; // e.g. CHAR_001
   name: string;
-  className: string; // e.g. "검성", "마도성", "살성", "수호성", "궁성", "치유성", "호법성", "정령성"
+  className: string; // e.g. "검성", "마도성", "살성", "수호성", "궁성", "치유성", "호법성", "정령성", "권성"
   level: number;
   aliases: string[];
+  accountId?: string;
+  isMain?: boolean;
   isDefault?: boolean;
 }
 
@@ -47,6 +55,49 @@ export interface ArcanaItem {
   updatedAt?: string;
 }
 
+export type ArcanaPieceType = 'parchment' | 'compass' | 'chalice' | 'scale';
+
+export interface ArcanaPieceState {
+  pieceType: ArcanaPieceType;
+  name: string;
+  enhanceLevel: number; // 0 to 5
+  skills: Record<string, number>; // e.g. { '승천타': 4, '폭주': 2, '연환권': 2, '연격': 1 }
+  status: 'LOCKED' | 'ENDGAME' | 'IN_PROGRESS' | 'PLACEHOLDER';
+  isLocked: boolean;
+  notes?: string;
+  updatedAt?: string;
+}
+
+export interface DetailedArcanaState {
+  growthPhase?: 'FRESH_MAX_LEVEL' | 'GROWTH' | 'ENDGAME' | string;
+  pieces: {
+    parchment?: ArcanaPieceState;
+    compass?: ArcanaPieceState;
+    chalice?: ArcanaPieceState;
+    scale?: ArcanaPieceState;
+  };
+  protectedPieces: string[]; // e.g. ['parchment']
+  missingRequiredSkills: string[]; // e.g. ['폭주', '연환권']
+  targetRequiredSkills: number; // e.g. 4
+  requiredSkillTargetLevel: number; // 20
+  notes?: string[];
+  lastUpdated?: string;
+}
+
+export interface GlobalOptimizationPolicy {
+  arcanaGoal: 'MAXIMUM_ENDGAME' | string;
+  compromiseAllowed: boolean;
+  priority: string[]; // ['PARCHMENT', 'COMPASS', 'CHALICE', 'SCALE']
+  fixedSkillPiecesFirst: boolean;
+  parchmentTarget: string; // '422_OR_332_FOR_REQUIRED_SKILLS'
+  compassTarget: string; // 'ONE_REQUIRED_SKILL_LEVEL_4'
+  chaliceInitialLevel: number; // 1
+  scaleInitialLevel: number; // 1
+  endgameOrder: string[]; // ['CHALICE', 'SCALE']
+  policyNotes?: string[];
+  lastUpdated?: string;
+}
+
 export interface CharacterState {
   characterId: string;
   identity: CharacterIdentity;
@@ -61,6 +112,7 @@ export interface CharacterState {
   };
   equipment: Record<string, EquipmentItem>;
   arcana: Record<string, ArcanaItem>;
+  detailedArcana?: DetailedArcanaState;
   skills: Record<string, { name: string; level: number; rank?: string }>;
   currency: {
     kinah: number;
@@ -173,7 +225,18 @@ export interface MasterState {
       mainWeapon?: string;
       mainArcana?: string;
       kinah: number;
+      accountId?: string;
+      isMain?: boolean;
       keyStats?: string;
+    }
+  >;
+  accountSummaries?: Record<
+    string,
+    {
+      id: string;
+      name: string;
+      characterIds: string[];
+      totalKinah: number;
     }
   >;
   economySummary: {
@@ -184,6 +247,7 @@ export interface MasterState {
   };
   activeDecisions: string[];
   recheckTriggers: string[];
+  globalPolicy?: GlobalOptimizationPolicy;
 }
 
 export interface ChatMessage {

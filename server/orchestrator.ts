@@ -1,5 +1,5 @@
 /**
- * AION2 Agent Orchestration Layer
+ * AION2 Agent Orchestration Layer (Multi-Character / Multi-Account Aware)
  * Implements:
  * RECEIVE -> ROUTE -> IDENTIFY -> EXTRACT -> REGISTER -> UPDATE -> ANALYZE -> DECIDE -> VALIDATE -> REPORT
  */
@@ -18,7 +18,7 @@ import { ProjectStateRepository } from './repository.js';
 
 interface PipelineContext {
   userMessage: string;
-  conversation: Array<{ role: 'user' | 'assistant'; content: string }>;
+  conversation: Array<{ role: 'user' | 'assistant'; content: string; metadata?: any }>;
   repository: ProjectStateRepository;
 }
 
@@ -29,10 +29,25 @@ export class AionAgentOrchestrator {
     this.repository = repository;
   }
 
+  public parseEnhanceLevel(text: string): number | null {
+    // Matches "+15", "+ 15", "15강", "+15강", "15 강"
+    const plusMatch = text.match(/\+\s*([0-9]{1,2})/);
+    if (plusMatch) {
+      return parseInt(plusMatch[1], 10);
+    }
+    const gangMatch = text.match(/([0-9]{1,2})\s*강/);
+    if (gangMatch) {
+      return parseInt(gangMatch[1], 10);
+    }
+    return null;
+  }
+
   // Parse Korean monetary and quantity expressions deterministically
   public parseKoreanKinah(text: string): number | null {
     // Check for explicit zero or out of money
-    const zeroMatch = text.match(/(?:키나\s*(?:는|도|가)?\s*0|0\s*(?:키나|원)|키나\s*(?:전액\s*)?소진|키나\s*없)/i);
+    const zeroMatch = text.match(
+      /(?:키나\s*(?:는|도|가)?\s*0|0\s*(?:키나|원)|키나\s*(?:전액\s*)?소진|키나\s*없)/i
+    );
     if (zeroMatch) {
       return 0;
     }
@@ -62,7 +77,9 @@ export class AionAgentOrchestrator {
     }
 
     if (!found) {
-      const plainNumMatch = text.match(/([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{4,})\s*(?:키나|골드)?/);
+      const plainNumMatch = text.match(
+        /([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{4,})\s*(?:키나|골드)?/
+      );
       if (plainNumMatch) {
         const raw = plainNumMatch[1].replace(/,/g, '');
         total = parseInt(raw, 10);
@@ -82,7 +99,8 @@ export class AionAgentOrchestrator {
       const eok = Math.floor(abs / 100000000);
       const remainder = abs % 100000000;
       const cheonman = Math.round(remainder / 10000000);
-      formatted = cheonman > 0 ? `${eok}억 ${cheonman * 1000}만 키나` : `${eok}억 키나`;
+      formatted =
+        cheonman > 0 ? `${eok}억 ${cheonman * 1000}만 키나` : `${eok}억 키나`;
     } else if (abs >= 10000) {
       const man = Math.round(abs / 10000);
       formatted = `${man.toLocaleString()}만 키나`;
@@ -127,6 +145,7 @@ export class AionAgentOrchestrator {
       lower.includes('직업') ||
       lower.includes('레벨') ||
       lower.includes('스펙') ||
+      lower.includes('아니야') ||
       (lower.includes('벌었') && !lower.includes('얼마나')) ||
       lower.includes('획득')
     ) {
@@ -149,34 +168,41 @@ export class AionAgentOrchestrator {
 
     // COMPARE & OPTIMIZE
     if (
-      lower.includes('뭐부터') ||
-      lower.includes('중 뭐') ||
-      lower.includes('비교') ||
       lower.includes('vs') ||
-      lower.includes('어떤 게 나') ||
-      lower.includes('어느 쪽')
+      lower.includes('비교') ||
+      lower.includes('누구') ||
+      lower.includes('어떤 캐릭') ||
+      lower.includes('어느 캐릭') ||
+      lower.includes('어느 쪽') ||
+      lower.includes('뭐가 나') ||
+      lower.includes('뭐가 더') ||
+      lower.includes('뭘 먼저') ||
+      lower.includes('누굴 먼저') ||
+      lower.includes('전체 캐릭터') ||
+      lower.includes('어디에 투자')
     ) {
       intents.push('COMPARE');
       intents.push('OPTIMIZE');
-    } else if (
-      lower.includes('투자') ||
-      lower.includes('갈까') ||
-      lower.includes('올릴까') ||
-      lower.includes('할까 말까') ||
-      lower.includes('팔까') ||
-      lower.includes('살까') ||
+    }
+
+    if (
+      lower.includes('어떻게 할까') ||
       lower.includes('추천') ||
-      lower.includes('최적화') ||
-      lower.includes('세팅') ||
-      lower.includes('진로')
+      lower.includes('도전할까') ||
+      lower.includes('멈출까') ||
+      lower.includes('눌러야') ||
+      lower.includes('효율') ||
+      lower.includes('진로') ||
+      lower.includes('목표')
     ) {
       intents.push('OPTIMIZE');
     }
 
-    // DIAGNOSE & RE-EVALUATION
+    // DIAGNOSE
     if (
-      lower.includes('아직도 유효') ||
-      lower.includes('유효해') ||
+      lower.includes('판단') ||
+      lower.includes('진단') ||
+      lower.includes('평가') ||
       lower.includes('지난번') ||
       lower.includes('이전 추천') ||
       lower.includes('다시 봐줘') ||
@@ -214,399 +240,554 @@ export class AionAgentOrchestrator {
     // A. ROUTE INTENT
     const intents = this.routeIntents(userMessage);
 
-    // B. IDENTIFY CHARACTER
+    // B. IDENTIFY CHARACTER (Multi-character aware hierarchy)
     const charResolution = resolveCharacter(userMessage, conversation, repository);
-    const characterId = charResolution.characterId;
-    let charState = repository.getCharacter(characterId) || repository.getDefaultCharacter();
+    const targetCharId = charResolution.characterId;
+    let charState = targetCharId ? repository.getCharacter(targetCharId) : undefined;
 
     const stateChanges: string[] = [];
     let registeredEventId: string | undefined;
     let registeredDecisionId: string | undefined;
     let registeredConfidence: 'LOW' | 'MEDIUM' | 'HIGH' = 'HIGH';
 
-    // C. FACT EXTRACTION & MUTATION (Deterministic Domain Layer)
-    const enhanceMatch = userMessage.match(/([0-9]{1,2})\s*강/g);
-    const isSuccess = userMessage.includes('성공');
-    const kinahAmount = this.parseKoreanKinah(userMessage);
-    const isFarming =
-      userMessage.includes('사냥') ||
-      userMessage.includes('벌었') ||
-      userMessage.includes('파밍');
-    const isEnhanceAction =
-      userMessage.includes('강화했') ||
-      (userMessage.includes('강화') && (userMessage.includes('성공') || userMessage.includes('실패') || userMessage.includes('시도') || userMessage.includes('했어') || userMessage.includes('눌렀'))) ||
-      userMessage.includes('성공했') ||
-      userMessage.includes('실패했');
-    const isExpense =
-      userMessage.includes('썼어') ||
-      userMessage.includes('소모') ||
-      userMessage.includes('들었어') ||
-      userMessage.includes('지출') ||
-      userMessage.includes('비용');
-
     const nowIso = new Date().toISOString();
+    const isCorrection =
+      userMessage.includes('아니야') ||
+      userMessage.includes('잘못') ||
+      userMessage.includes('수정') ||
+      userMessage.includes('변경');
 
-    // 1. Check for Class & Level update (e.g. "직업은 살성", "궁성 55렙")
-    const classNames = ['검성', '수호성', '살성', '궁성', '마도성', '정령성', '치유성', '호법성'];
-    const matchedClass = classNames.find((c) => userMessage.includes(c));
-    const levelMatch = userMessage.match(/([0-9]{1,2})\s*(?:레벨|렙|lv)/i);
-    const matchedLevel = levelMatch ? parseInt(levelMatch[1], 10) : null;
+    // C. FACT EXTRACTION & MUTATION (Only when a specific character is identified)
+    if (targetCharId && charState) {
+      const enhanceLevel = this.parseEnhanceLevel(userMessage);
+      const isSuccess = userMessage.includes('성공');
+      const kinahAmount = this.parseKoreanKinah(userMessage);
+      const isFarming =
+        userMessage.includes('사냥') ||
+        userMessage.includes('벌었') ||
+        userMessage.includes('파밍');
+      const isEnhanceAction =
+        userMessage.includes('강화했') ||
+        (userMessage.includes('강화') &&
+          (userMessage.includes('성공') ||
+            userMessage.includes('실패') ||
+            userMessage.includes('시도') ||
+            userMessage.includes('했어') ||
+            userMessage.includes('눌렀'))) ||
+        userMessage.includes('성공했') ||
+        userMessage.includes('실패했');
+      const isExpense =
+        userMessage.includes('썼어') ||
+        userMessage.includes('소모') ||
+        userMessage.includes('들었어') ||
+        userMessage.includes('지출') ||
+        userMessage.includes('비용');
 
-    if (matchedClass || matchedLevel) {
-      charState = repository.updateCharacterState(characterId, (draft) => {
-        if (matchedClass) {
-          draft.identity.className = matchedClass;
-          draft.identity.name = matchedClass;
-          draft.identity.aliases = Array.from(new Set([...(draft.identity.aliases || []), matchedClass]));
-          stateChanges.push(`직업: ${matchedClass} 설정`);
-        }
-        if (matchedLevel) {
-          draft.identity.level = matchedLevel;
-          stateChanges.push(`레벨: Lv.${matchedLevel} 설정`);
-        }
-        return draft;
-      });
-    }
+      // 1. Check for Class & Level update (Note: NEVER overwrite character name with class name!)
+      const classNames = [
+        '권성',
+        '치유성',
+        '호법성',
+        '수호성',
+        '검성',
+        '살성',
+        '궁성',
+        '마도성',
+        '정령성',
+      ];
+      const matchedClass = classNames.find((c) => userMessage.includes(c));
+      const levelMatch = userMessage.match(/([0-9]{1,2})\s*(?:레벨|렙|lv)/i);
+      const matchedLevel = levelMatch ? parseInt(levelMatch[1], 10) : null;
 
-    // 2. Check for Combat Stats update
-    const atkMatch = userMessage.match(/(?:공격력|물공|마공)\s*[:=]?\s*([0-9]{3,5})/);
-    const critMatch = userMessage.match(/(?:치명타|물치|마치)\s*[:=]?\s*([0-9]{2,4})/);
-    const accMatch = userMessage.match(/(?:명중)\s*[:=]?\s*([0-9]{3,5})/);
-    const defMatch = userMessage.match(/(?:방어|물방)\s*[:=]?\s*([0-9]{3,5})/);
-    const hpMatch = userMessage.match(/(?:생명력|hp)\s*[:=]?\s*([0-9]{4,6})/i);
+      if (matchedClass || matchedLevel) {
+        charState = repository.updateCharacterState(targetCharId, (draft) => {
+          if (matchedClass) {
+            draft.identity.className = matchedClass;
+            // Preserving original draft.identity.name! Do not overwrite name!
+            draft.identity.aliases = Array.from(
+              new Set([...(draft.identity.aliases || []), matchedClass])
+            );
+            stateChanges.push(`[${draft.identity.name}] 직업: ${matchedClass} 설정`);
+          }
+          if (matchedLevel) {
+            draft.identity.level = matchedLevel;
+            stateChanges.push(`[${draft.identity.name}] 레벨: Lv.${matchedLevel} 설정`);
+          }
+          return draft;
+        });
+      }
 
-    if (atkMatch || critMatch || accMatch || defMatch || hpMatch) {
-      charState = repository.updateCharacterState(characterId, (draft) => {
-        if (!draft.coreStats) {
-          draft.coreStats = { physicalAttack: 0, critRate: 0, accuracy: 0, defense: 0, hp: 0 };
-        }
-        if (atkMatch) {
-          draft.coreStats.physicalAttack = parseInt(atkMatch[1], 10);
-          stateChanges.push(`공격력: ${draft.coreStats.physicalAttack}`);
-        }
-        if (critMatch) {
-          draft.coreStats.critRate = parseInt(critMatch[1], 10);
-          stateChanges.push(`치명타: ${draft.coreStats.critRate}`);
-        }
-        if (accMatch) {
-          draft.coreStats.accuracy = parseInt(accMatch[1], 10);
-          stateChanges.push(`명중: ${draft.coreStats.accuracy}`);
-        }
-        if (defMatch) {
-          draft.coreStats.defense = parseInt(defMatch[1], 10);
-          stateChanges.push(`방어력: ${draft.coreStats.defense}`);
-        }
-        if (hpMatch) {
-          draft.coreStats.hp = parseInt(hpMatch[1], 10);
-          stateChanges.push(`생명력: ${draft.coreStats.hp}`);
-        }
-        return draft;
-      });
-    }
+      // 2. Check for Combat Stats update
+      const atkMatch = userMessage.match(/(?:공격력|물공|마공)\s*[:=]?\s*([0-9]{3,5})/);
+      const critMatch = userMessage.match(/(?:치명타|물치|마치)\s*[:=]?\s*([0-9]{2,4})/);
+      const accMatch = userMessage.match(/(?:명중)\s*[:=]?\s*([0-9]{3,5})/);
+      const defMatch = userMessage.match(/(?:방어|물방)\s*[:=]?\s*([0-9]{3,5})/);
+      const hpMatch = userMessage.match(/(?:생명력|hp)\s*[:=]?\s*([0-9]{4,6})/i);
+      const healMatch = userMessage.match(/(?:치유력|증폭|마증)\s*[:=]?\s*([0-9]{3,5})/);
 
-    // 3. Enhancement Action Event vs Direct Equipment Setting
-    if (isEnhanceAction && enhanceMatch && enhanceMatch.length > 0) {
-      const eventId = `EVT_${Date.now()}`;
-      const levels = enhanceMatch.map((m) => parseInt(m.replace(/[^0-9]/g, ''), 10));
-      const targetLevel = levels[0];
+      if (atkMatch || critMatch || accMatch || defMatch || hpMatch || healMatch) {
+        charState = repository.updateCharacterState(targetCharId, (draft) => {
+          if (!draft.coreStats) {
+            draft.coreStats = {
+              physicalAttack: 0,
+              critRate: 0,
+              accuracy: 0,
+              defense: 0,
+              hp: 0,
+            };
+          }
+          if (atkMatch) {
+            draft.coreStats.physicalAttack = parseInt(atkMatch[1], 10);
+            stateChanges.push(
+              `[${draft.identity.name}] 공격력: ${draft.coreStats.physicalAttack}`
+            );
+          }
+          if (critMatch) {
+            draft.coreStats.critRate = parseInt(critMatch[1], 10);
+            stateChanges.push(
+              `[${draft.identity.name}] 치명타: ${draft.coreStats.critRate}`
+            );
+          }
+          if (accMatch) {
+            draft.coreStats.accuracy = parseInt(accMatch[1], 10);
+            stateChanges.push(
+              `[${draft.identity.name}] 명중: ${draft.coreStats.accuracy}`
+            );
+          }
+          if (defMatch) {
+            draft.coreStats.defense = parseInt(defMatch[1], 10);
+            stateChanges.push(
+              `[${draft.identity.name}] 방어력: ${draft.coreStats.defense}`
+            );
+          }
+          if (hpMatch) {
+            draft.coreStats.hp = parseInt(hpMatch[1], 10);
+            stateChanges.push(
+              `[${draft.identity.name}] 생명력: ${draft.coreStats.hp}`
+            );
+          }
+          if (healMatch) {
+            draft.coreStats.magicBoost = parseInt(healMatch[1], 10);
+            stateChanges.push(
+              `[${draft.identity.name}] 치유력/증폭: ${draft.coreStats.magicBoost}`
+            );
+          }
+          return draft;
+        });
+      }
 
-      const isArcana = userMessage.includes('아르카나');
-      const isArmor =
-        userMessage.includes('방어구') ||
-        userMessage.includes('흉갑') ||
-        userMessage.includes('판금') ||
-        userMessage.includes('사슬') ||
-        userMessage.includes('가죽') ||
-        userMessage.includes('로브');
-      const targetItemName = isArcana
-        ? '파괴의 아르카나'
-        : isArmor
-        ? charState.equipment.chest?.name || '판금 흉갑'
-        : charState.equipment.weapon?.name || (userMessage.includes('창') ? '창' : '대검');
+      // 3. Enhancement Action Event vs Direct Equipment Setting
+      if (isEnhanceAction && enhanceLevel !== null) {
+        const eventId = `EVT_${Date.now()}`;
+        const targetLevel = enhanceLevel;
 
-      const spentKinah = isExpense && kinahAmount ? kinahAmount : 0;
+        const isArcana = userMessage.includes('아르카나');
+        const isArmor =
+          userMessage.includes('방어구') ||
+          userMessage.includes('흉갑') ||
+          userMessage.includes('판금') ||
+          userMessage.includes('사슬') ||
+          userMessage.includes('가죽') ||
+          userMessage.includes('로브');
+        const targetItemName = isArcana
+          ? '파괴의 아르카나'
+          : isArmor
+          ? charState.equipment.chest?.name || '판금 흉갑'
+          : charState.equipment.weapon?.name ||
+            (charState.identity.className === '호법성'
+              ? '지팡이'
+              : charState.identity.className === '수호성'
+              ? '한손검'
+              : charState.identity.className === '권성'
+              ? '권갑'
+              : charState.identity.className === '치유성'
+              ? '전래봉'
+              : '대검');
 
-      const newEvent: AionEvent = {
-        id: eventId,
-        datetime: nowIso,
-        characterId,
-        type: 'enhancement',
-        summary: `${charState.identity.className} ${targetItemName} ${targetLevel}강 ${isSuccess ? '성공' : '시도'} (${spentKinah > 0 ? this.formatKinah(spentKinah) + ' 소모' : '비용 미입력'})`,
-        facts: {
-          item: targetItemName,
-          targetLevel,
-          success: isSuccess,
-          spentKinah,
-        },
-        stateChanges: {},
-        confidence: 'CONFIRMED',
-      };
+        const spentKinah = isExpense && kinahAmount ? kinahAmount : 0;
 
-      charState = repository.updateCharacterState(characterId, (draft) => {
-        if (isArcana) {
-          draft.arcana.mainArcana = { name: targetItemName, enhanceLevel: targetLevel };
-          stateChanges.push(`아르카나 강화 수치 +${targetLevel} 반영`);
-        } else if (isArmor) {
-          draft.equipment.chest = { name: targetItemName, enhanceLevel: targetLevel, slot: 'chest' };
-          stateChanges.push(`방어구 강화 수치 +${targetLevel} 반영`);
-        } else {
-          draft.equipment.weapon = { name: targetItemName, enhanceLevel: targetLevel, slot: 'weapon' };
-          stateChanges.push(`주무기 강화 수치 +${targetLevel} 반영`);
-        }
+        const newEvent: AionEvent = {
+          id: eventId,
+          datetime: nowIso,
+          characterId: targetCharId,
+          type: 'enhancement',
+          summary: `${charState.identity.name} (${charState.identity.className}) ${targetItemName} ${targetLevel}강 ${isSuccess ? '성공' : '시도'} (${spentKinah > 0 ? this.formatKinah(spentKinah) + ' 소모' : '비용 미입력'})`,
+          facts: {
+            item: targetItemName,
+            targetLevel,
+            success: isSuccess,
+            spentKinah,
+          },
+          stateChanges: {},
+          confidence: 'CONFIRMED',
+        };
 
-        if (spentKinah > 0) {
+        charState = repository.updateCharacterState(targetCharId, (draft) => {
+          if (isArcana) {
+            draft.arcana.mainArcana = {
+              name: targetItemName,
+              enhanceLevel: targetLevel,
+            };
+            stateChanges.push(
+              `[${draft.identity.name}] 아르카나 강화 수치 +${targetLevel} 반영`
+            );
+          } else if (isArmor) {
+            draft.equipment.chest = {
+              name: targetItemName,
+              enhanceLevel: targetLevel,
+              slot: 'chest',
+            };
+            stateChanges.push(
+              `[${draft.identity.name}] 방어구 강화 수치 +${targetLevel} 반영`
+            );
+          } else {
+            draft.equipment.weapon = {
+              name: targetItemName,
+              enhanceLevel: targetLevel,
+              slot: 'weapon',
+            };
+            stateChanges.push(
+              `[${draft.identity.name}] 주무기 강화 수치 +${targetLevel} 반영`
+            );
+          }
+
+          if (spentKinah > 0) {
+            const before = draft.currency.kinah || 0;
+            const after = Math.max(0, before - spentKinah);
+            draft.currency.kinah = after;
+            stateChanges.push(
+              `[${draft.identity.name}] 보유 키나: ${this.formatKinah(before)} -> ${this.formatKinah(after)}`
+            );
+
+            const ledgerId = `LEDGER_${Date.now()}`;
+            repository.saveLedgerEntry({
+              id: ledgerId,
+              datetime: nowIso,
+              characterId: targetCharId,
+              currency: 'kinah',
+              direction: 'expense',
+              amount: spentKinah,
+              category: 'enhancement',
+              balanceBefore: before,
+              balanceAfter: after,
+              sourceEventId: eventId,
+              confidence: 'CONFIRMED',
+              note: `${targetItemName} ${targetLevel}강 시도 비용`,
+            });
+          }
+          return draft;
+        });
+
+        newEvent.stateChanges = { stateChanges };
+        repository.saveEvent(newEvent);
+        registeredEventId = eventId;
+      } else if (
+        enhanceLevel !== null &&
+        !intents.includes('COMPARE') &&
+        !userMessage.includes('?')
+      ) {
+        // Direct Equipment / Weapon / Arcana Setting (e.g. "무기 15강이야", "햐음 아르카나 +15")
+        const level = enhanceLevel;
+        const isArcana = userMessage.includes('아르카나');
+        const isArmor =
+          userMessage.includes('방어구') ||
+          userMessage.includes('흉갑') ||
+          userMessage.includes('판금') ||
+          userMessage.includes('사슬') ||
+          userMessage.includes('가죽') ||
+          userMessage.includes('로브');
+        const isWeapon =
+          userMessage.includes('무기') ||
+          userMessage.includes('대검') ||
+          userMessage.includes('창') ||
+          userMessage.includes('단검') ||
+          userMessage.includes('장검') ||
+          userMessage.includes('활') ||
+          userMessage.includes('지팡이') ||
+          userMessage.includes('권갑') ||
+          (!isArcana && !isArmor);
+
+        charState = repository.updateCharacterState(targetCharId, (draft) => {
+          if (isArcana) {
+            draft.arcana.mainArcana = {
+              name: draft.arcana.mainArcana?.name || '파괴의 아르카나',
+              enhanceLevel: level,
+            };
+            stateChanges.push(
+              `[${draft.identity.name}] 아르카나: +${level}강 설정 완료`
+            );
+          } else if (isArmor) {
+            draft.equipment.chest = {
+              name: draft.equipment.chest?.name || '판금 흉갑',
+              enhanceLevel: level,
+              slot: 'chest',
+            };
+            stateChanges.push(
+              `[${draft.identity.name}] 방어구: +${level}강 설정 완료`
+            );
+          } else if (isWeapon) {
+            const defaultWeapon =
+              draft.identity.className === '호법성'
+                ? '지팡이'
+                : draft.identity.className === '수호성'
+                ? '한손검'
+                : draft.identity.className === '권성'
+                ? '권갑'
+                : draft.identity.className === '치유성'
+                ? '전래봉'
+                : '대검';
+            draft.equipment.weapon = {
+              name: draft.equipment.weapon?.name || defaultWeapon,
+              enhanceLevel: level,
+              slot: 'weapon',
+            };
+            stateChanges.push(
+              `[${draft.identity.name}] 주무기: ${draft.equipment.weapon.name} +${level}강 설정 완료`
+            );
+          }
+          return draft;
+        });
+      }
+
+      // 4. Kinah: Farming Income vs Expense vs Baseline / Correction Overwrite
+      if (isFarming && kinahAmount !== null && kinahAmount > 0) {
+        const eventId = `EVT_${Date.now()}`;
+        const earned = kinahAmount;
+
+        charState = repository.updateCharacterState(targetCharId, (draft) => {
           const before = draft.currency.kinah || 0;
-          const after = Math.max(0, before - spentKinah);
+          const after = before + earned;
           draft.currency.kinah = after;
-          stateChanges.push(`보유 키나: ${this.formatKinah(before)} -> ${this.formatKinah(after)}`);
+          draft.farmingHistory.totalEarnedKinah =
+            (draft.farmingHistory.totalEarnedKinah || 0) + earned;
+          draft.farmingHistory.farmingRecords.push({
+            date: nowIso,
+            amount: earned,
+            location: '사냥 및 파밍',
+          });
+          stateChanges.push(
+            `[${draft.identity.name}] 파밍 수익 +${this.formatKinah(earned)} 반영 (잔액: ${this.formatKinah(after)})`
+          );
 
           const ledgerId = `LEDGER_${Date.now()}`;
           repository.saveLedgerEntry({
             id: ledgerId,
             datetime: nowIso,
-            characterId,
+            characterId: targetCharId,
             currency: 'kinah',
-            direction: 'expense',
-            amount: spentKinah,
-            category: 'enhancement',
+            direction: 'income',
+            amount: earned,
+            category: 'farming',
             balanceBefore: before,
             balanceAfter: after,
             sourceEventId: eventId,
             confidence: 'CONFIRMED',
-            note: `${targetItemName} ${targetLevel}강 시도 비용`,
+            note: '사냥 및 파밍 수익',
           });
-        }
-        return draft;
-      });
-
-      newEvent.stateChanges = { stateChanges };
-      repository.saveEvent(newEvent);
-      registeredEventId = eventId;
-    } else if (
-      enhanceMatch &&
-      enhanceMatch.length > 0 &&
-      !intents.includes('COMPARE') &&
-      !userMessage.includes('?')
-    ) {
-      // Direct Equipment / Weapon / Arcana Setting (e.g. "무기 15강이야", "현재 아르카나 13강")
-      const level = parseInt(enhanceMatch[0].replace(/[^0-9]/g, ''), 10);
-      const isArcana = userMessage.includes('아르카나');
-      const isArmor =
-        userMessage.includes('방어구') ||
-        userMessage.includes('흉갑') ||
-        userMessage.includes('판금') ||
-        userMessage.includes('사슬') ||
-        userMessage.includes('가죽') ||
-        userMessage.includes('로브');
-      const isWeapon =
-        userMessage.includes('무기') ||
-        userMessage.includes('대검') ||
-        userMessage.includes('창') ||
-        userMessage.includes('단검') ||
-        userMessage.includes('장검') ||
-        userMessage.includes('활') ||
-        userMessage.includes('지팡이') ||
-        (!isArcana && !isArmor);
-
-      charState = repository.updateCharacterState(characterId, (draft) => {
-        if (isArcana) {
-          draft.arcana.mainArcana = {
-            name: draft.arcana.mainArcana?.name || '파괴의 아르카나',
-            enhanceLevel: level,
-          };
-          stateChanges.push(`아르카나: +${level}강 설정 완료`);
-        } else if (isArmor) {
-          draft.equipment.chest = {
-            name: draft.equipment.chest?.name || '판금 흉갑',
-            enhanceLevel: level,
-            slot: 'chest',
-          };
-          stateChanges.push(`방어구: +${level}강 설정 완료`);
-        } else if (isWeapon) {
-          draft.equipment.weapon = {
-            name: draft.equipment.weapon?.name || (userMessage.includes('창') ? '창' : '대검'),
-            enhanceLevel: level,
-            slot: 'weapon',
-          };
-          stateChanges.push(`주무기: ${draft.equipment.weapon.name} +${level}강 설정 완료`);
-        }
-        return draft;
-      });
-    }
-
-    // 4. Kinah: Farming Income vs Expense vs Baseline Overwrite
-    if (isFarming && kinahAmount !== null && kinahAmount > 0) {
-      const eventId = `EVT_${Date.now()}`;
-      const earned = kinahAmount;
-
-      charState = repository.updateCharacterState(characterId, (draft) => {
-        const before = draft.currency.kinah || 0;
-        const after = before + earned;
-        draft.currency.kinah = after;
-        draft.farmingHistory.totalEarnedKinah = (draft.farmingHistory.totalEarnedKinah || 0) + earned;
-        draft.farmingHistory.farmingRecords.push({
-          date: nowIso,
-          amount: earned,
-          location: '사냥 및 파밍',
+          return draft;
         });
-        stateChanges.push(`파밍 수익 +${this.formatKinah(earned)} 반영 (잔액: ${this.formatKinah(after)})`);
 
-        const ledgerId = `LEDGER_${Date.now()}`;
-        repository.saveLedgerEntry({
-          id: ledgerId,
+        repository.saveEvent({
+          id: eventId,
           datetime: nowIso,
-          characterId,
-          currency: 'kinah',
-          direction: 'income',
-          amount: earned,
-          category: 'farming',
-          balanceBefore: before,
-          balanceAfter: after,
-          sourceEventId: eventId,
+          characterId: targetCharId,
+          type: 'farming',
+          summary: `사냥 파밍 정산 (+${this.formatKinah(earned)})`,
+          facts: { amount: earned },
+          stateChanges: { 'currency.kinah': `+${earned}` },
           confidence: 'CONFIRMED',
-          note: '사냥 및 파밍 수익',
         });
-        return draft;
-      });
+        registeredEventId = eventId;
+      } else if (
+        isExpense &&
+        kinahAmount !== null &&
+        kinahAmount > 0 &&
+        !isEnhanceAction
+      ) {
+        // Standalone expenditure
+        const eventId = `EVT_${Date.now()}`;
+        const spent = kinahAmount;
 
-      repository.saveEvent({
-        id: eventId,
-        datetime: nowIso,
-        characterId,
-        type: 'farming',
-        summary: `사냥 파밍 정산 (+${this.formatKinah(earned)})`,
-        facts: { amount: earned },
-        stateChanges: { 'currency.kinah': `+${earned}` },
-        confidence: 'CONFIRMED',
-      });
-      registeredEventId = eventId;
-    } else if (isExpense && kinahAmount !== null && kinahAmount > 0 && !isEnhanceAction) {
-      // Standalone expenditure
-      const eventId = `EVT_${Date.now()}`;
-      const spent = kinahAmount;
+        charState = repository.updateCharacterState(targetCharId, (draft) => {
+          const before = draft.currency.kinah || 0;
+          const after = Math.max(0, before - spent);
+          draft.currency.kinah = after;
+          stateChanges.push(
+            `[${draft.identity.name}] 지출 반영: -${this.formatKinah(spent)} (잔액: ${this.formatKinah(after)})`
+          );
 
-      charState = repository.updateCharacterState(characterId, (draft) => {
-        const before = draft.currency.kinah || 0;
-        const after = Math.max(0, before - spent);
-        draft.currency.kinah = after;
-        stateChanges.push(`지출 반영: -${this.formatKinah(spent)} (잔액: ${this.formatKinah(after)})`);
+          const ledgerId = `LEDGER_${Date.now()}`;
+          repository.saveLedgerEntry({
+            id: ledgerId,
+            datetime: nowIso,
+            characterId: targetCharId,
+            currency: 'kinah',
+            direction: 'expense',
+            amount: spent,
+            category: 'expenditure',
+            balanceBefore: before,
+            balanceAfter: after,
+            sourceEventId: eventId,
+            confidence: 'CONFIRMED',
+            note: '일반 지출',
+          });
+          return draft;
+        });
 
-        const ledgerId = `LEDGER_${Date.now()}`;
-        repository.saveLedgerEntry({
-          id: ledgerId,
+        repository.saveEvent({
+          id: eventId,
           datetime: nowIso,
-          characterId,
-          currency: 'kinah',
-          direction: 'expense',
-          amount: spent,
-          category: 'expenditure',
-          balanceBefore: before,
-          balanceAfter: after,
-          sourceEventId: eventId,
+          characterId: targetCharId,
+          type: 'expenditure',
+          summary: `지출 기록 (${this.formatKinah(spent)} 소모)`,
+          facts: { spentKinah: spent },
+          stateChanges: { 'currency.kinah': `-${spent}` },
           confidence: 'CONFIRMED',
-          note: '일반 지출',
         });
-        return draft;
-      });
+        registeredEventId = eventId;
+      } else if (
+        !isExpense &&
+        !isFarming &&
+        kinahAmount !== null &&
+        !isEnhanceAction &&
+        !intents.includes('SUMMARY') &&
+        !userMessage.includes('?')
+      ) {
+        // Direct Kinah Baseline / Correction Overwrite (e.g. "햐음 키나 5천만", "아니야 햐음 키나 8천만")
+        const newKinah = kinahAmount;
+        charState = repository.updateCharacterState(targetCharId, (draft) => {
+          const before = draft.currency.kinah || 0;
+          draft.currency.kinah = newKinah;
+          stateChanges.push(
+            `[${draft.identity.name}] 보유 키나: ${this.formatKinah(before)} -> ${this.formatKinah(newKinah)} (${isCorrection ? '정정 반영' : '기준 잔액 설정'})`
+          );
 
-      repository.saveEvent({
-        id: eventId,
-        datetime: nowIso,
-        characterId,
-        type: 'expenditure',
-        summary: `지출 기록 (${this.formatKinah(spent)} 소모)`,
-        facts: { spentKinah: spent },
-        stateChanges: { 'currency.kinah': `-${spent}` },
-        confidence: 'CONFIRMED',
-      });
-      registeredEventId = eventId;
-    } else if (
-      !isExpense &&
-      !isFarming &&
-      kinahAmount !== null &&
-      !isEnhanceAction &&
-      !intents.includes('SUMMARY') &&
-      !userMessage.includes('?')
-    ) {
-      // Direct Kinah Baseline Overwrite (e.g. "키나 5천만이야", "현재 키나 3억", "키나 0원이야")
-      const newKinah = kinahAmount;
-      charState = repository.updateCharacterState(characterId, (draft) => {
-        const before = draft.currency.kinah || 0;
-        draft.currency.kinah = newKinah;
+          const ledgerId = `LEDGER_${Date.now()}`;
+          repository.saveLedgerEntry({
+            id: ledgerId,
+            datetime: nowIso,
+            characterId: targetCharId,
+            currency: 'kinah',
+            direction: isCorrection
+              ? 'correction'
+              : newKinah >= before
+              ? 'income'
+              : 'expense',
+            amount: Math.abs(newKinah - before),
+            category: 'adjustment',
+            balanceBefore: before,
+            balanceAfter: newKinah,
+            confidence: 'CONFIRMED',
+            note: `[${draft.identity.name}] 보유 키나 ${isCorrection ? '정정' : '기준 잔액 설정'} (${this.formatKinah(newKinah)})`,
+          });
+          return draft;
+        });
+
+        const eventId = `EVT_${Date.now()}`;
+        repository.saveEvent({
+          id: eventId,
+          datetime: nowIso,
+          characterId: targetCharId,
+          type: isCorrection ? 'correction' : 'status_change',
+          summary: `[${charState.identity.name}] 보유 키나 ${isCorrection ? '정정' : '기준 잔액 설정'} (${this.formatKinah(newKinah)})`,
+          facts: { newKinah, isCorrection },
+          stateChanges: { 'currency.kinah': this.formatKinah(newKinah) },
+          confidence: 'CONFIRMED',
+        });
+        registeredEventId = eventId;
+      }
+    } else if (charResolution.matchedBy === 'unresolved') {
+      // User tried to input numbers/levels, but character was not specified
+      const kinahAmount = this.parseKoreanKinah(userMessage);
+      const enhanceLvl = this.parseEnhanceLevel(userMessage);
+      if (
+        (kinahAmount !== null || enhanceLvl !== null) &&
+        !userMessage.includes('?') &&
+        !intents.includes('COMPARE')
+      ) {
         stateChanges.push(
-          `보유 키나: ${this.formatKinah(before)} -> ${this.formatKinah(newKinah)} (기준 잔액 설정)`
+          '캐릭터 미식별: 5개 캐릭터(질풍호법, 격앙수호, 지켈검성, 햐음, 쩡은) 중 대상을 지정해주세요.'
         );
-
-        const ledgerId = `LEDGER_${Date.now()}`;
-        repository.saveLedgerEntry({
-          id: ledgerId,
-          datetime: nowIso,
-          characterId,
-          currency: 'kinah',
-          direction: newKinah >= before ? 'income' : 'expense',
-          amount: Math.abs(newKinah - before),
-          category: 'adjustment',
-          balanceBefore: before,
-          balanceAfter: newKinah,
-          confidence: 'CONFIRMED',
-          note: `보유 키나 기준 잔액 설정 (${this.formatKinah(newKinah)})`,
-        });
-        return draft;
-      });
-
-      const eventId = `EVT_${Date.now()}`;
-      repository.saveEvent({
-        id: eventId,
-        datetime: nowIso,
-        characterId,
-        type: 'status_change',
-        summary: `보유 키나 기준 잔액 설정 (${this.formatKinah(newKinah)})`,
-        facts: { newKinah },
-        stateChanges: { 'currency.kinah': this.formatKinah(newKinah) },
-        confidence: 'CONFIRMED',
-      });
-      registeredEventId = eventId;
+      }
     }
 
-    // D. BUILD RELEVANT CONTEXT FOR GEMINI REASONING
-    const recentEvents = repository.getEvents(characterId, 5);
-    const recentLedger = repository.getLedger(characterId, 6);
+    // D. BUILD RELEVANT CONTEXT FOR GEMINI REASONING (5-Character & 2-Account Aware)
     const masterState = repository.getMasterState();
+    const allCharacters = repository.getCharacters();
+    const allAccounts = repository.getAccounts();
     const latestDecision = repository.getLatestDecision();
 
-    // Check if the previous decision has been affected
-    const hasTriggeredRecheck =
-      latestDecision &&
-      (userMessage.includes('17강') ||
-        stateChanges.some((sc) => sc.includes('17강') || sc.includes('키나')) ||
-        intents.includes('DIAGNOSE'));
+    // Roster summary for multi-character reasoning
+    const rosterSummary = allCharacters.map((c) => ({
+      id: c.characterId,
+      name: c.identity.name,
+      className: c.identity.className,
+      level: c.identity.level,
+      accountId: c.identity.accountId,
+      accountName: allAccounts[c.identity.accountId || '']?.name || '계정 미지정',
+      isMain: c.identity.isMain ?? false,
+      kinah: c.currency.kinah || 0,
+      formattedKinah: this.formatKinah(c.currency.kinah || 0),
+      weapon: c.equipment.weapon
+        ? `${c.equipment.weapon.name} +${c.equipment.weapon.enhanceLevel}`
+        : '무기 정보 없음',
+      arcana: c.arcana.mainArcana
+        ? `${c.arcana.mainArcana.name} +${c.arcana.mainArcana.enhanceLevel}`
+        : '아르카나 정보 없음',
+      coreStats: c.coreStats,
+    }));
 
-    // Construct targeted reasoning prompt
+    const accountSummaries = Object.entries(allAccounts).map(([accId, acc]) => {
+      const charsInAcc = allCharacters.filter(
+        (c) => c.identity.accountId === accId
+      );
+      const totalKinah = charsInAcc.reduce(
+        (sum, c) => sum + (c.currency.kinah || 0),
+        0
+      );
+      return {
+        id: accId,
+        name: acc.name,
+        totalKinahFormatted: this.formatKinah(totalKinah),
+        totalKinah,
+        characters: charsInAcc.map(
+          (c) => `${c.identity.name}(${c.identity.className}${c.identity.isMain ? '/본캐' : ''})`
+        ),
+      };
+    });
+
     const contextPrompt = {
+      userMessage,
       intents,
-      character: {
-        id: charState.characterId,
-        name: charState.identity.name,
-        className: charState.identity.className,
-        level: charState.identity.level,
-        weapon: charState.equipment.weapon,
-        arcana: charState.arcana.mainArcana,
-        currentKinah: charState.currency.kinah,
-        formattedKinah: this.formatKinah(charState.currency.kinah),
-        coreStats: charState.coreStats,
+      characterResolution: {
+        matchedBy: charResolution.matchedBy,
+        targetCharacterId: targetCharId || null,
+        targetCharacterName: charState?.identity.name || null,
       },
-      weeklyEconomy: masterState.economySummary,
-      recentEvents: recentEvents.map((e) => ({
-        type: e.type,
-        summary: e.summary,
-        time: e.datetime,
-      })),
-      recentLedger: recentLedger.map((l) => ({
-        direction: l.direction,
-        amount: this.formatKinah(l.amount),
-        category: l.category,
-        note: l.note,
-      })),
+      targetCharacter: charState
+        ? {
+            id: charState.characterId,
+            name: charState.identity.name,
+            className: charState.identity.className,
+            level: charState.identity.level,
+            accountId: charState.identity.accountId,
+            isMain: charState.identity.isMain ?? false,
+            weapon: charState.equipment.weapon,
+            arcana: charState.arcana.mainArcana,
+            currentKinah: charState.currency.kinah,
+            formattedKinah: this.formatKinah(charState.currency.kinah),
+            coreStats: charState.coreStats,
+          }
+        : null,
+      allCharacters: rosterSummary,
+      accountSummaries,
+      totalEconomy: {
+        totalKinah: masterState.economySummary.totalKinah,
+        formattedTotalKinah: this.formatKinah(masterState.economySummary.totalKinah),
+        weeklyIncome: masterState.economySummary.weeklyIncome,
+        weeklyExpense: masterState.economySummary.weeklyExpense,
+        netWeekly: masterState.economySummary.netWeekly,
+      },
       previousDecision: latestDecision
         ? {
             id: latestDecision.id,
@@ -615,9 +796,7 @@ export class AionAgentOrchestrator {
             result: latestDecision.result,
           }
         : null,
-      hasTriggeredRecheck,
       stateChangesMade: stateChanges,
-      userMessage,
     };
 
     // E. GEMINI REASONING LAYER
@@ -625,238 +804,135 @@ export class AionAgentOrchestrator {
     const modelsToTry = ['gemini-3.6-flash', 'gemini-2.0-flash'];
     try {
       const gemini = getGeminiClient();
-      const systemInstruction = `당신은 AION 2 OPTIMIZER의 핵심 추론 엔진입니다.
-당신은 한국어 자연어를 완벽히 이해하며, 감정적이거나 불필요하게 장황하지 않은 "AION 2 최적화 전문 오퍼레이터" 톤으로 답변합니다.
+      const systemInstruction = `당신은 AION 2 OPTIMIZER의 5개 캐릭터/2개 계정 통합 추론 엔진입니다.
+당신은 한국어 자연어를 완벽히 이해하며, 군더더기 없는 냉정하고 체계적인 "AION 2 최적화 전문 오퍼레이터" 톤으로 답변합니다.
+
+[시스템 및 캐릭터 구조]
+1. 계정 1 (첫번째 계정):
+   - 질풍호법: 호법성 / 본캐
+   - 격앙수호: 수호성
+   - 지켈검성: 검성
+2. 계정 2 (두번째 계정):
+   - 햐음: 권성 / 본캐
+   - 쩡은: 치유성
 
 [원칙]
-1. 제공된 현재 상태(캐릭터 스펙, 무기/아르카나 강화 단계, 키나 보유액, 경제 원장)를 절대적인 사실(Authoritative)로 간주하십시오.
-2. 수치나 확률을 허위로 지어내지(fabricate) 마십시오. 불확실한 것은 불확실하다고 명시하십시오.
-3. 최적화 질문(무기 vs 아르카나 등) 시:
-   - 사용자가 제시한 선택지만 보지 말고, "자원 보존(현금 유동성 유지)", "대체 투자처", "단계적 시도" 등 언급되지 않은 대안까지 반드시 비교 분석하십시오.
-   - 단기 이득, 기회비용, 실패 위험, 복구 시간, 유동성 보존 가치를 냉정히 평가하십시오.
-   - 명확한 지배 전략(Dominant Option)이 있다면 확실하게 우선순위를 권고하십시오.
-   - 반드시 반대 검증(Contrarian Check: "어떤 조건이 발생하면 이 추천이 뒤집히는가?")을 포함하십시오.
-4. 사용자 응답 형식:
-   - 최적화/비교 질문:
-     **결론**
-     **근거**
-     **대안 비교** (사용자 옵션 및 자원 보존/단계적 대안 비교)
-     **실행 순서** (구체적이고 즉시 실행 가능한 순서)
+1. '본캐'는 육성 우선순위 가중치일 뿐 시스템 기본(default) 선택 캐릭터가 아닙니다.
+2. 특정 캐릭터(예: 햐음, 질풍호법, 쩡은 등)가 명시되거나 지칭된 경우 절대로 다른 캐릭터(검성 등)와 혼동하거나 직업명을 캐릭터 이름으로 덮어쓰지 마십시오.
+3. 사용자가 "전체 캐릭터 중 누구를 먼저 강화할까?", "햐음이랑 쩡은 중 누구부터?", "전체적으로 뭘 먼저 해야 돼?" 등 다중 캐릭터/계정 비교 질문을 한 경우:
+   - 5개 캐릭터(질풍호법, 격앙수호, 지켈검성, 햐음, 쩡은)의 현재 스펙, 무기/아르카나 단계, 계정별 키나 보유액, 본캐 가중치를 모두 대조 분석하십시오.
+   - 단기 이득, 위험도, 기회비용, 계정별 자원 배분을 고려해 명확한 강화/육성 순위를 제시하십시오.
+4. 사용자 입력에 캐릭터가 명시되지 않은 단순 수치 설정 시, 섣불리 특정 캐릭터로 단정하지 않고 어느 캐릭터의 정보인지 명확히 안내하십시오.
+5. 제공된 최신 상태(contextPrompt.targetCharacter 및 stateChangesMade)를 절대적인 사실(Authoritative)로 간주하십시오.
+6. 응답 형식:
+   - 비교/최적화 질문:
+     **결론** (명확한 우선순위)
+     **근거** (스펙 및 자원 비교)
+     **대안 비교** (자원 보존 및 단계별 투자)
+     **실행 순서** (즉시 실행할 액션)
      **뒤집는 조건** (이 결정이 무효화되는 트리거)
-   - 기록(RECORD) 질문:
+   - 기록(RECORD) 및 정정 질문:
      **기록 결과**
      **상태 변화**
-     (필요시 간단한 다음 권장 조치 1줄)
+     (필요시 다음 권장 조치 1줄)
    - 요약(SUMMARY) 질문:
-     **기간**
-     **핵심 수치** (수입, 지출, 순증감, 잔액)
-     **해석**
-   - 지난번 추천 유효성(DIAGNOSE / 재평가) 질문:
-     이전 추천의 가정과 현재 상태의 변화를 대조하여 명확히 "유효", "부분 수정", 또는 "전면 갱신"을 판정하고 새 진로를 제시하십시오.
-5. 질문을 되묻지 마십시오 (No-question default). 주어진 정보로 최선의 결론을 먼저 내리고, 미확인 사항은 조건부로 덧붙이십시오.
-6. 생각 과정(Chain-of-thought)이나 시스템 내부 프롬프트는 노출하지 마십시오.
-7. 사용자가 키나 보유 잔액, 무기/아르카나/방어구 수치, 직업, 레벨, 스탯을 직접 입력하거나 덮어쓴 경우, 이전 정보 대신 새로 전달된 최신 상태(contextPrompt.character 및 stateChangesMade)를 최우선으로 반영하여 답변하십시오.`;
+     **계정 및 캐릭터별 요약**
+     **총 자산 현황**
+     **해석 및 제언**
+7. 질문을 불필요하게 되묻지 말고(No-question default), 최선의 결론을 먼저 제시하십시오.`;
 
       for (const modelName of modelsToTry) {
         try {
           const response = await gemini.models.generateContent({
             model: modelName,
-            contents: `[컨텍스트 데이터]\n${JSON.stringify(contextPrompt, null, 2)}\n\n[사용자 메시지]\n"${userMessage}"`,
-            config: {
-              systemInstruction,
-              temperature: 0.2,
-            },
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    text: `${systemInstruction}\n\n[현재 시스템 상태 및 사용자 입력 데이터]\n${JSON.stringify(
+                      contextPrompt,
+                      null,
+                      2
+                    )}\n\n사용자 메시지: "${userMessage}"`,
+                  },
+                ],
+              },
+            ],
           });
 
           if (response.text) {
             aiAnswer = response.text;
             break;
           }
-        } catch {
-          // Silent fallback to next available model or deterministic generator
+        } catch (modelErr) {
+          console.warn(`Model ${modelName} failed:`, modelErr);
         }
       }
-    } catch {
-      // Fall back to deterministic domain response if offline
+    } catch (err) {
+      console.error('Gemini call error:', err);
     }
 
     if (!aiAnswer) {
-      aiAnswer = this.generateDeterministicResponse(intents, contextPrompt);
+      // Deterministic Local Fallback if AI unavailable
+      if (stateChanges.length > 0) {
+        aiAnswer = `**기록 결과**\n${stateChanges.map((sc) => `- ${sc}`).join('\n')}\n\n최신 상태가 정상적으로 영속 저장되었습니다.`;
+      } else if (intents.includes('COMPARE') || intents.includes('OPTIMIZE')) {
+        aiAnswer = `**결론**\n현재 등록된 5개 캐릭터(질풍호법, 격앙수호, 지켈검성, 햐음, 쩡은)의 데이터를 비교합니다.\n\n**현황**\n` +
+          rosterSummary
+            .map(
+              (r) =>
+                `- **${r.name}** (${r.className}${r.isMain ? ' / 본캐' : ''}): ${r.formattedKinah}, 주무기 ${r.weapon}, 아르카나 ${r.arcana}`
+            )
+            .join('\n') +
+          `\n\n총 보유 자산: ${this.formatKinah(masterState.economySummary.totalKinah)}`;
+      } else {
+        aiAnswer = `데이터가 처리되었습니다.`;
+      }
     }
 
     // F. SAVE DECISION IF OPTIMIZE/COMPARE
     if (intents.includes('OPTIMIZE') || intents.includes('COMPARE')) {
-      const decisionId = `DEC_${Date.now()}`;
+      const decId = `DEC_${Date.now()}`;
       const newDecision: DecisionRecord = {
-        id: decisionId,
-        datetime: new Date().toISOString(),
-        scope: `${charState.identity.className} 강화 및 스펙업 최적화`,
+        id: decId,
+        datetime: nowIso,
+        scope: targetCharId
+          ? `${charState?.identity.name || targetCharId} 최적화`
+          : '전체 5캐릭터 통합 최적화',
         problem: userMessage,
-        goal: '최소 기회비용과 유동성 보존 하에 스펙 극대화',
-        constraints: ['키나 유동성 유지', '강화 실패 시 딜로스 방지'],
+        goal: '스펙 향상 및 자원 기회비용 최적화',
+        constraints: [
+          `총 보유 자산: ${this.formatKinah(masterState.economySummary.totalKinah)}`,
+          '본캐: 질풍호법, 햐음',
+        ],
         knownFacts: [
-          `무기: ${charState.equipment.weapon?.name || '대검'} +${charState.equipment.weapon?.enhanceLevel || 15}`,
-          `아르카나: +${charState.arcana.mainArcana?.enhanceLevel || 15}`,
-          `보유 키나: ${this.formatKinah(charState.currency.kinah)}`,
+          `타겟 캐릭터: ${charState ? `${charState.identity.name} (${charState.identity.className})` : '전체 5캐릭터'}`,
+          ...stateChanges,
         ],
-        unknowns: ['차기 패치 이벤트 일정'],
-        hypotheses: ['아르카나 우선 투자가 리스크 대비 가성비 우위'],
-        options: [
-          { name: '무기 추가 강화', cost: '고위험/고비용' },
-          { name: '아르카나 강화', cost: '중위험/안정적 딜상승' },
-          { name: '자금 비축', cost: '비용 없음/유동성 보존' },
-        ],
-        recommendation: aiAnswer.slice(0, 150),
-        confidence: 'HIGH',
-        recheckTriggers: [
-          '보유 키나 5천만 이하 소진 시',
-          '목표 장비 강화 수치 변동 시',
-          '신규 패치 공지 시',
-        ],
-        result: 'pending',
+        unknowns: [],
+        hypotheses: [],
+        options: [],
+        recommendation: aiAnswer.slice(0, 300),
+        confidence: registeredConfidence,
+        recheckTriggers: ['키나 변동', '강화 단계 변경', '신규 장비 획득'],
+        result: 'executed',
       };
       repository.saveDecision(newDecision);
-      registeredDecisionId = decisionId;
-    }
-
-    // If previous decision was queried or re-evaluated, update its status
-    if (latestDecision && hasTriggeredRecheck) {
-      latestDecision.result = 'superseded';
-      repository.saveDecision(latestDecision);
+      registeredDecisionId = decId;
     }
 
     return {
       answer: aiAnswer,
       intents,
-      characterId,
+      characterId: targetCharId || (charResolution.matchedBy === 'all_characters' ? 'ALL' : 'UNRESOLVED'),
       stateChanges,
       metadata: {
-        eventId: registeredEventId,
         decisionId: registeredDecisionId,
+        eventId: registeredEventId,
+        recheckTriggers: ['키나 변동', '강화 단계 변경'],
         confidence: registeredConfidence,
       },
     };
-  }
-
-  // Deterministic fallback response when offline or API key is not yet set
-  private generateDeterministicResponse(
-    intents: IntentType[],
-    ctx: Record<string, any>
-  ): string {
-    const char = ctx.character;
-    const weekly = ctx.weeklyEconomy;
-    const kinahFormatted = char.formattedKinah;
-
-    // SCENARIO A: RECORD
-    if (intents.includes('RECORD')) {
-      const stateLines = ctx.stateChangesMade.length > 0
-        ? ctx.stateChangesMade.map((s: string) => `- ${s}`).join('\n')
-        : '- 변경 사항 정상 반영 완료';
-
-      return `**기록 결과**
-- ${char.name}(${char.className})의 강화 시도 및 지출 내역이 이벤트 메모리와 경제 원장에 정상 반영되었습니다.
-
-**상태 변화**
-${stateLines}
-- 현재 잔여 키나: **${kinahFormatted}**
-
-현재 무기 및 아르카나 수치에 맞추어 최적화 모델이 갱신되었습니다.`;
-    }
-
-    // SCENARIO C: SUMMARY
-    if (intents.includes('SUMMARY')) {
-      const income = this.formatKinah(weekly.weeklyIncome);
-      const expense = this.formatKinah(weekly.weeklyExpense);
-      const net = this.formatKinah(weekly.netWeekly);
-      const netDisplay = weekly.netWeekly > 0 ? `+${net}` : net;
-
-      return `**기간**
-- 최근 7일 (주간 결산)
-
-**핵심 수치**
-| 구분 | 금액 | 비고 |
-| :--- | :--- | :--- |
-| **총 수입 (파밍)** | **${income}** | 인던 및 필드 파밍 정산 |
-| **총 지출** | **${expense}** | 강화 및 재료 구매 |
-| **순증감** | **${netDisplay}** | 주간 순수익 |
-| **현재 보유 잔액** | **${kinahFormatted}** | 전체 유동 자산 |
-
-**해석**
-- 주간 파밍 수입이 지출을 상회하여 양호한 현금 흐름을 유지하고 있습니다. 무리한 고강화 연속 시도보다는 일정 비율(최소 5천만 키나)의 유동성 예비 자금을 항상 확보해 두는 것을 권장합니다.`;
-    }
-
-    // SCENARIO D: RE-EVALUATION / DIAGNOSE
-    if (intents.includes('DIAGNOSE') || ctx.userMessage.includes('유효')) {
-      const prev = ctx.previousDecision;
-      const isChanged = ctx.hasTriggeredRecheck;
-
-      if (isChanged && prev) {
-        return `**결론**
-- **이전 추천은 [재평가 필요 / 전면 갱신] 상태입니다.**
-
-**근거**
-- 이전 권고(${prev.id})는 *'무기 15강 유지 하에 키나 유동성 확보 또는 아르카나 분산'*을 전제로 수립되었습니다.
-- 최근 장비 수치 변경 또는 대규모 키나 지출이 발생하여 이전의 '재평가 트리거' 조건을 충족했습니다.
-
-**현재 상태 기준 최적 권고**
-1. 현재 주무기 및 잔여 키나(${kinahFormatted})를 감안할 때, 추가 무리한 직행은 실패 시 복구 기간이 과도하게 길어집니다.
-2. 당분간은 아르카나 15~17강 방어 및 방어구 마석 안정화에 우선 순위를 두십시오.
-
-**뒤집는 조건**
-- 유동 키나 1.5억 이상 재확보 시 재검토`;
-      }
-    }
-
-    // SCENARIO E: EQUIPMENT SALE / TRADE ("이 장비 팔까 말까?")
-    if (ctx.userMessage.includes('팔까') || ctx.userMessage.includes('판매')) {
-      return `**결론**
-- **해당 장비는 즉시 거래소 헐값 매도보다 보존(스왑/부캐용)하거나 주말 피크 시세에 매도하는 전략이 우세합니다.**
-
-**근거**
-1. **거래소 수수료 및 감가**: 즉시 매각 시 거래소 수수료(10~15%) 차감으로 실수령액이 적고, 차후 메타 변동 시 재구매 비용이 훨씬 큽니다.
-2. **유동성 여유**: 현재 보유 키나(${kinahFormatted})는 즉각적인 파산 위험이 없는 수준이므로 급전 헐값 매도의 필요성이 낮습니다.
-3. **대체 세팅 대비**: PVE 사냥용과 PVP 방어 세팅 간의 보조 장비 스왑 잠재 가치가 유지됩니다.
-
-**대안 비교**
-| 선택지 | 예상 결과 | 리스크 | 평가 |
-| :--- | :--- | :--- | :--- |
-| **A. 즉시 판매 (최저가 던짐)** | 키나 즉시 회수 | 헐값 매각, 재구매 불가 | ⚠️ 비추천 |
-| **B. 보존 (스왑/예비)** | 세팅 유연성 확보 | 인벤토리 점유 | **추천 (지배 옵션)** |
-| **C. 주말 고점 분할 매도** | 시세 최고가 매각 | 판매 대기 시간 | 우수 대안 |
-| **D. 재료 추출 (마석/강화석)** | 재료 직접 수급 | 기대값 불확실 | 상황별 고려 |
-
-**실행 순서**
-1. 거래소의 최근 3일간 평균 낙찰가를 확인합니다.
-2. 당장 5,000만 키나 이상의 비상 현금이 필요한지 점검합니다.
-3. 여유가 있다면 보관함에 보존하고, 처분 시에는 주말 피크 타임에 기준가 +5%로 출품합니다.
-
-**뒤집는 조건**
-- 거래소 시세가 25% 이상 급등하여 고점 매도가 가능하거나, 다른 종결 장비 구매를 위해 5,000만 키나 이상이 즉각 부족한 경우 즉시 판매로 전환하십시오.`;
-    }
-
-    // SCENARIO B: OPTIMIZE & COMPARE (무기 vs 아르카나 등)
-    return `**결론**
-- **아르카나 17강(또는 15강 안정 세팅)을 먼저 진행하고, 잔여 키나를 보존하는 전략이 우세합니다.**
-
-**근거**
-1. **리스크 비대칭성**: 무기 고강화 실패 시 주력 딜링의 하락으로 즉각적인 사냥 효율 감소가 발생하지만, 아르카나는 실패 시에도 기본 무기 베이스 공격력이 보존됩니다.
-2. **비용 효율**: 무기 17강 도전에 소요되는 기회비용(평균 1억~1.5억 키나) 대비 아르카나는 약 4,000만~6,000만 키나 선에서 공격력/피증 스탯을 안정적으로 확보할 수 있습니다.
-3. **유동성 보존**: 현재 보유액(${kinahFormatted})에서 전액을 무기에 올인할 경우, 차후 업데이트나 비상 재료 구매에 즉각적인 유동성 위기가 발생합니다.
-
-**대안 비교**
-| 선택지 | 예상 비용 | 실패 리스크 | 장점 | 평가 |
-| :--- | :--- | :--- | :--- | :--- |
-| **A. 무기 17강 직행** | 약 8천만~1.5억 | 극심 (딜로스) | 성공 시 폭발적 공격력 | ⚠️ 위험 과다 |
-| **B. 아르카나 17강** | 약 4천만~6천만 | 중간 (무기 보존) | 안정적 스펙업, 피증 확보 | **추천 (지배 옵션)** |
-| **C. 자금 비축 (현행 유지)** | 0 키나 | 없음 | 차주 이벤트 대응 유동성 | 우수 |
-| **D. 단계적 시도 (1차 3천만 상한)** | 3,000만 키나 | 제한적 | 손실 한도 확정 | 권장 |
-
-**실행 순서**
-1. **예비비 확보**: 현재 잔액 중 최소 5,000만 키나는 비상 유동 자금으로 동결합니다.
-2. **아르카나 우선 강화**: 가용 예산 한도 내에서 아르카나 17강을 1차 목표로 시도합니다.
-3. **손절 한도 준수**: 4,000만 키나 이상 소진 시 즉시 중단하고 주간 파밍으로 자금을 보충합니다.
-
-**뒤집는 조건**
-- 거래소 강화석 시세가 30% 이상 폭락하거나, 강화 확률 부스팅 이벤트가 공지되는 경우 무기 투자의 가치가 급상승할 수 있습니다.`;
   }
 }
