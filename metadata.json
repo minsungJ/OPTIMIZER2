@@ -1,0 +1,6 @@
+{
+  "name": "AION 2 OPTIMIZER",
+  "description": "A persistent conversational AION 2 game optimizer and economy tracker.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
